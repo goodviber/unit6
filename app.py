@@ -9,18 +9,15 @@ app.secret_key = 'your_secret_key'  # Required for session management
 users = {}  # email -> User object
 orders = {}  # order_id -> Order object
 
-# Create demo user for testing
 demo_user = User("demo@bookstore.com", "demo123", "Demo User", "123 Demo Street, Demo City, DC 12345")
 users["demo@bookstore.com"] = demo_user
 
-# Create a cart instance to manage the cart
 cart = Cart()
 
-# Create a global books list to avoid duplication
 BOOKS = [
     Book("The Great Gatsby", "Fiction", 10.99, "/images/books/the_great_gatsby.jpg"),
     Book("1984", "Dystopia", 8.99, "/images/books/1984.jpg"),
-    Book("I Ching", "Traditional", 18.99, "/images/books/I-Ching.jpg"),
+    Book("I Ching", "Traditional", 18.99, "/images/books/i_ching.jpg"),
     Book("Moby Dick", "Adventure", 12.49, "/images/books/moby_dick.jpg")
 ]
 
@@ -57,13 +54,22 @@ def index():
 @app.route('/add-to-cart', methods=['POST'])
 def add_to_cart():
     book_title = request.form.get('title')
-    quantity = int(request.form.get('quantity', 1))
+    quantity_str = request.form.get('quantity', '1')
     
-    book = None
-    for b in BOOKS:
-        if b.title == book_title:
-            book = b
-            break
+    # Validate and convert quantity with error handling
+    try:
+        quantity = int(quantity_str)
+        if quantity <= 0:
+            flash('Quantity must be a positive number', 'error')
+            return redirect(url_for('index'))
+        if quantity > 100:  # Reasonable upper limit
+            flash('Quantity cannot exceed 100 items', 'error')
+            return redirect(url_for('index'))
+    except (ValueError, TypeError):
+        flash('Invalid quantity. Please enter a valid number.', 'error')
+        return redirect(url_for('index'))
+
+    book = get_book_by_title(book_title)
     
     if book:
         cart.add_book(book, quantity)
@@ -100,7 +106,21 @@ def update_cart():
         - Confirmation of update otherwise
     """
     book_title = request.form.get('title')
-    quantity = int(request.form.get('quantity', 1))
+    quantity_str = request.form.get('quantity', '1')
+    
+    # Validate and convert quantity with error handling
+    try:
+        quantity = int(quantity_str)
+        # Note: Allow 0 for removal, but check for negative values
+        if quantity < 0:
+            flash('Quantity cannot be negative', 'error')
+            return redirect(url_for('view_cart'))
+        if quantity > 100:  # Reasonable upper limit
+            flash('Quantity cannot exceed 100 items', 'error')
+            return redirect(url_for('view_cart'))
+    except (ValueError, TypeError):
+        flash('Invalid quantity. Please enter a valid number.', 'error')
+        return redirect(url_for('view_cart'))
     
     cart.update_quantity(book_title, quantity)
     
@@ -142,7 +162,7 @@ def process_checkout():
     if cart.is_empty():
         flash('Your cart is empty!', 'error')
         return redirect(url_for('index'))
-    
+
     # Get form data
     shipping_info = {
         'name': request.form.get('name'),
@@ -152,17 +172,34 @@ def process_checkout():
         'zip_code': request.form.get('zip_code')
     }
     
-    payment_info = {
-        'payment_method': request.form.get('payment_method'),
-        'card_number': request.form.get('card_number'),
-        'expiry_date': request.form.get('expiry_date'),
-        'cvv': request.form.get('cvv')
-    }
+
+    # Validate required shipping fields
+    required_fields = ['name', 'email', 'address', 'city', 'zip_code']
+    for field in required_fields:
+        if not shipping_info.get(field, '').strip():
+            flash(f'Please fill in the {field.replace("_", " ")} field', 'error')
+            return redirect(url_for('checkout'))
+
+    # Get payment information
+    payment_method = request.form.get('payment_method')
+    payment_info = {'payment_method': payment_method}
+
+    # Add payment-specific fields based on method
+    if payment_method == 'credit_card':
+        payment_info.update({
+            'card_number': request.form.get('card_number'),
+            'expiry_date': request.form.get('expiry_date'),
+            'cvv': request.form.get('cvv')
+        })
+    elif payment_method == 'paypal':
+        payment_info['paypal_email'] = request.form.get('paypal_email')
+
+    # Calculate total and add to payment_info
     
-    discount_code = request.form.get('discount_code', '')
+    total_amount = cart.get_total_price()
+    discount_code = request.form.get('discount_code', '').strip().upper()
     
     # Calculate total with discount
-    total_amount = cart.get_total_price()
     discount_applied = 0
     
     if discount_code == 'SAVE10':
@@ -175,57 +212,40 @@ def process_checkout():
         flash(f'Welcome discount applied! You saved ${discount_applied:.2f}', 'success')
     elif discount_code:
         flash('Invalid discount code', 'error')
-    
-    required_fields = ['name', 'email', 'address', 'city', 'zip_code']
-    for field in required_fields:
-        if not shipping_info.get(field):
-            flash(f'Please fill in the {field.replace("_", " ")} field', 'error')
-            return redirect(url_for('checkout'))
-    
-    if payment_info['payment_method'] == 'credit_card':
-        if not payment_info.get('card_number') or not payment_info.get('expiry_date') or not payment_info.get('cvv'):
-            flash('Please fill in all credit card details', 'error')
-            return redirect(url_for('checkout'))
-    
-    # Process payment through mock gateway
-    payment_result = PaymentGateway.process_payment(payment_info)
+    payment_info['amount'] = total_amount  # Add amount to payment_info
+
+    # Process payment (pass only payment_info)
+    payment_result = PaymentGateway.process_payment(payment_info)  # Only one argument
     
     if not payment_result['success']:
-        flash(payment_result['message'], 'error')
+        # Display validation errors
+        if 'errors' in payment_result:
+            for error in payment_result['errors']:
+                flash(error, 'error')
+        else:
+            flash(payment_result['message'], 'error')
         return redirect(url_for('checkout'))
+
+    # Payment successful - create order
+    from uuid import uuid4
+    order_id = str(uuid4())[:8].upper()
     
-    # Create order
-    order_id = str(uuid.uuid4())[:8].upper()
+    # Add transaction ID to payment info
+    payment_info['transaction_id'] = payment_result['transaction_id']
+
     order = Order(
         order_id=order_id,
         user_email=shipping_info['email'],
         items=cart.get_items(),
         shipping_info=shipping_info,
-        payment_info={
-            'method': payment_info['payment_method'],
-            'transaction_id': payment_result['transaction_id']
-        },
+        payment_info=payment_info,
         total_amount=total_amount
     )
-    
-    # Store order
+
     orders[order_id] = order
-    
-    # Add order to user if logged in
-    current_user = get_current_user()
-    if current_user:
-        current_user.add_order(order)
-    
-    # Send confirmation email (mock)
-    EmailService.send_order_confirmation(shipping_info['email'], order)
-    
-    # Clear cart
     cart.clear()
-    
-    # Store order in session for confirmation page
-    session['last_order_id'] = order_id
-    
-    flash('Payment successful! Your order has been confirmed.', 'success')
+
+    flash('Your order has been successfully processed!', 'success')
     return redirect(url_for('order_confirmation', order_id=order_id))
 
 

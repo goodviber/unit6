@@ -1,3 +1,5 @@
+import random
+import time
 class Book:
     def __init__(self, title, category, price, image):
         self.title = title
@@ -49,15 +51,24 @@ class Cart:
             del self.items[book_title]
 
     def update_quantity(self, book_title, quantity):
-        if book_title in self.items:
+        if book_title not in self.items:
+            return False
+
+        try:
+            quantity = int(quantity)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid quantity: {quantity!r}. Must be an integer.")
+
+        if quantity <= 0:
+            del self.items[book_title]
+        else:
             self.items[book_title].quantity = quantity
 
-    def get_total_price(self):
-        total = 0
-        for item in self.items.values():
-            for i in range(item.quantity):
-                total += item.book.price
-        return total
+        return True
+
+
+    def get_total_price(self) -> float:
+        return sum(item.book.price * item.quantity for item in self.items.values())
 
     def get_total_items(self):
         return sum(item.quantity for item in self.items.values())
@@ -80,8 +91,6 @@ class User:
         self.name = name
         self.address = address
         self.orders = []
-        self.temp_data = []
-        self.cache = {}
     
     def add_order(self, order):
         self.orders.append(order)
@@ -131,10 +140,6 @@ class PaymentGateway:
                 'message': 'Payment failed: Invalid card number',
                 'transaction_id': None
             }
-        
-        import random
-        import time
-        import datetime
         
         time.sleep(0.1)
         
